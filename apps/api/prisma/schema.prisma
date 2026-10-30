@@ -1,0 +1,213 @@
+// Every table that holds a customer's data carries company_id and is protected
+// by a PostgreSQL row-level security policy (see migrations/*_row_level_security).
+// The API connects as a restricted role and sets app.company_id per transaction.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  OWNER
+  HR
+  EMPLOYEE
+}
+
+enum WorkState {
+  TS
+  AP
+  KA
+}
+
+enum EmployeeStatus {
+  ACTIVE
+  NOTICE
+  EXITED
+}
+
+enum AttendanceStatus {
+  PRESENT
+  WFH
+  LEAVE
+  ABSENT
+}
+
+enum LeaveType {
+  CL
+  SL
+  EL
+}
+
+enum LeaveStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  WITHDRAWN
+}
+
+enum RunStatus {
+  DRAFT
+  LOCKED
+}
+
+model Company {
+  id          String   @id @default(uuid()) @db.Uuid
+  name        String
+  legalName   String   @map("legal_name")
+  city        String?
+  pan         String?
+  tan         String?
+  pfCode      String?  @map("pf_code")
+  esiCode     String?  @map("esi_code")
+  /// PT registration number per state, e.g. {"TS": "36123456789"}
+  ptRegistrations Json @default("{}") @map("pt_registrations")
+  basicPct    Int      @default(50) @map("basic_pct")
+  hraPct      Int      @default(40) @map("hra_pct")
+  /// Days per calendar year by leave type, e.g. {"CL": 12, "SL": 12, "EL": 15}
+  leavePolicy Json     @default("{\"CL\":12,\"SL\":12,\"EL\":15}") @map("leave_policy")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  users       User[]
+  employees   Employee[]
+
+  @@map("company")
+}
+
+/// Login accounts. Not under row-level security because sign-in looks a user up
+/// by email before the company is known; only the auth service reads this table.
+model User {
+  id           String   @id @default(uuid()) @db.Uuid
+  companyId    String   @map("company_id") @db.Uuid
+  email        String   @unique
+  passwordHash String   @map("password_hash")
+  role         Role
+  employeeId   String?  @unique @map("employee_id") @db.Uuid
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  company      Company   @relation(fields: [companyId], references: [id])
+  employee     Employee? @relation(fields: [employeeId], references: [id])
+
+  @@map("app_user")
+}
+
+model Employee {
+  id            String         @id @default(uuid()) @db.Uuid
+  companyId     String         @map("company_id") @db.Uuid
+  code          String
+  name          String
+  email         String?
+  phone         String?
+  designation   String
+  department    String
+  city          String
+  state         WorkState
+  dateOfJoining DateTime       @map("date_of_joining") @db.Date
+  annualCtc     Int            @map("annual_ctc")
+  pan           String
+  uan           String?
+  bankAccount   String?        @map("bank_account")
+  ifsc          String?
+  managerId     String?        @map("manager_id") @db.Uuid
+  status        EmployeeStatus @default(ACTIVE)
+  createdAt     DateTime       @default(now()) @map("created_at")
+
+  company       Company        @relation(fields: [companyId], references: [id])
+  manager       Employee?      @relation("Reports", fields: [managerId], references: [id])
+  reports       Employee[]     @relation("Reports")
+  user          User?
+  attendance    AttendanceDay[]
+  leaves        LeaveRequest[]
+  payslips      Payslip[]
+
+  @@unique([companyId, code])
+  @@unique([companyId, pan])
+  @@index([companyId, department])
+  @@map("employee")
+}
+
+model AttendanceDay {
+  id         String           @id @default(uuid()) @db.Uuid
+  companyId  String           @map("company_id") @db.Uuid
+  employeeId String           @map("employee_id") @db.Uuid
+  date       DateTime         @db.Date
+  status     AttendanceStatus
+  checkIn    DateTime?        @map("check_in")
+  checkOut   DateTime?        @map("check_out")
+
+  employee   Employee         @relation(fields: [employeeId], references: [id])
+
+  @@unique([employeeId, date])
+  @@index([companyId, date])
+  @@map("attendance_day")
+}
+
+model LeaveRequest {
+  id          String      @id @default(uuid()) @db.Uuid
+  companyId   String      @map("company_id") @db.Uuid
+  employeeId  String      @map("employee_id") @db.Uuid
+  type        LeaveType
+  fromDate    DateTime    @map("from_date") @db.Date
+  toDate      DateTime    @map("to_date") @db.Date
+  days        Int
+  reason      String
+  status      LeaveStatus @default(PENDING)
+  decidedById String?     @map("decided_by_id") @db.Uuid
+  decidedAt   DateTime?   @map("decided_at")
+  createdAt   DateTime    @default(now()) @map("created_at")
+
+  employee    Employee    @relation(fields: [employeeId], references: [id])
+
+  @@index([companyId, status])
+  @@map("leave_request")
+}
+
+model PayrollRun {
+  id         String    @id @default(uuid()) @db.Uuid
+  companyId  String    @map("company_id") @db.Uuid
+  month      String
+  status     RunStatus @default(DRAFT)
+  computedAt DateTime  @default(now()) @map("computed_at")
+  lockedAt   DateTime? @map("locked_at")
+  lockedById String?   @map("locked_by_id") @db.Uuid
+
+  payslips   Payslip[]
+
+  @@unique([companyId, month])
+  @@map("payroll_run")
+}
+
+model Payslip {
+  id         String     @id @default(uuid()) @db.Uuid
+  companyId  String     @map("company_id") @db.Uuid
+  runId      String     @map("run_id") @db.Uuid
+  employeeId String     @map("employee_id") @db.Uuid
+  month      String
+  /// Full breakdown from @softlynx/payroll, frozen when the run is locked
+  breakdown  Json
+  netPay     Int        @map("net_pay")
+
+  run        PayrollRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+  employee   Employee   @relation(fields: [employeeId], references: [id])
+
+  @@unique([runId, employeeId])
+  @@index([companyId, employeeId])
+  @@map("payslip")
+}
+
+model AuditLog {
+  id        String   @id @default(uuid()) @db.Uuid
+  companyId String   @map("company_id") @db.Uuid
+  actorId   String   @map("actor_id") @db.Uuid
+  action    String
+  entity    String
+  entityId  String?  @map("entity_id")
+  detail    Json?
+  at        DateTime @default(now())
+
+  @@index([companyId, at])
+  @@map("audit_log")
+}
